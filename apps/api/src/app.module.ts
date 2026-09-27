@@ -10,6 +10,7 @@ import { KycModule } from './kyc/kyc.module';
 import { StorageModule } from './storage/storage.module';
 import { CryptoModule } from './crypto/crypto.module';
 import { ProductsModule } from './products/products.module';
+import { SellersModule } from './sellers/sellers.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { ProductsModule } from './products/products.module';
     KycModule,
     CryptoModule,
     ProductsModule,
+    SellersModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
