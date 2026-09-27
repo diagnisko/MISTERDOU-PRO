@@ -14,6 +14,7 @@ import { SellersModule } from './sellers/sellers.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { InstallmentsModule } from './installments/installments.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -37,6 +38,7 @@ import { InstallmentsModule } from './installments/installments.module';
     OrdersModule,
     PaymentsModule,
     InstallmentsModule,
+    AdminModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
