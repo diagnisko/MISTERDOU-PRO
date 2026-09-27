@@ -1,5 +1,4 @@
-import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, MaxLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 
 /**
  * Canaux de paiement présentés au client — Wave et Orange Money.
@@ -21,10 +20,4 @@ export class PayInstallmentDto {
   @IsString()
   @MaxLength(64)
   note?: string;
-}
-
-export class CreateOrderDtoPlaceholder {
-  @Type(() => Number)
-  @IsInt()
-  placeholder!: number;
 }
