@@ -19,6 +19,8 @@ import { SupportModule } from './support/support.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { PromotionsModule } from './promotions/promotions.module';
 import { SchedulerModule } from './scheduler/scheduler.module';
+import { MailerModule } from './mailer/mailer.module';
+import { TwoFaModule } from './twofa/twofa.module';
 
 @Module({
   imports: [
@@ -47,6 +49,8 @@ import { SchedulerModule } from './scheduler/scheduler.module';
     NotificationsModule,
     PromotionsModule,
     SchedulerModule,
+    MailerModule,
+    TwoFaModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
