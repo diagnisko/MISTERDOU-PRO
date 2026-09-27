@@ -8,6 +8,8 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { KycModule } from './kyc/kyc.module';
 import { StorageModule } from './storage/storage.module';
+import { CryptoModule } from './crypto/crypto.module';
+import { ProductsModule } from './products/products.module';
 
 @Module({
   imports: [
@@ -25,6 +27,8 @@ import { StorageModule } from './storage/storage.module';
     UsersModule,
     StorageModule,
     KycModule,
+    CryptoModule,
+    ProductsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
