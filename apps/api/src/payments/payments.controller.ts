@@ -19,7 +19,7 @@ export class PaymentsController {
   constructor(private readonly payments: PaymentsService) {}
 
   /**
-   * Initiation du paiement (utilisateur authentifié).
+   * Initiation du paiement complet (utilisateur authentifié).
    */
   @Post('initiate/:orderId')
   @Roles('CLIENT', 'SELLER', 'ADMIN')
@@ -29,6 +29,20 @@ export class PaymentsController {
     @Param('orderId', ParseUUIDPipe) orderId: string,
   ) {
     return this.payments.initiatePayment((req as any).user.sub, orderId);
+  }
+
+  /**
+   * Initiation du paiement échelonné — apport initial ou prochaine mensualité.
+   * Type et montant déterminés côté serveur (jamais le client).
+   */
+  @Post('initiate/installment/:planId')
+  @Roles('CLIENT', 'SELLER', 'ADMIN')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  initiateInstallment(
+    @Req() req: FastifyRequest,
+    @Param('planId', ParseUUIDPipe) planId: string,
+  ) {
+    return this.payments.initiateInstallmentPayment((req as any).user.sub, planId);
   }
 
   /**
