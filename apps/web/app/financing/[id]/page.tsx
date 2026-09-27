@@ -29,6 +29,8 @@ interface PlanDetail {
   }[];
 }
 
+type Channel = 'WAVE' | 'OM';
+
 const fmt = (n: string | number) =>
   new Intl.NumberFormat('fr-SN').format(Number(n)) + ' FCFA';
 
@@ -45,6 +47,7 @@ export default function FinancingDetailPage() {
   const [plan, setPlan] = useState<PlanDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
+  const [channel, setChannel] = useState<Channel>('WAVE');
 
   async function load() {
     const token = localStorage.getItem('md_token');
@@ -68,11 +71,18 @@ export default function FinancingDetailPage() {
     try {
       const res = await fetch(
         `${API}/api/v1/payments/initiate/installment/${id}`,
-        { method: 'POST', headers: { Authorization: `Bearer ${token ?? ''}` } },
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token ?? ''}`,
+          },
+          body: JSON.stringify({ channel }),
+        },
       );
       const data = await res.json();
       if (!res.ok) throw new Error(data.message ?? 'Erreur');
-      // TODO(prod) : rediriger vers data.payment_url (PayTech)
+      // TODO(prod) : rediriger vers data.payment_url (page du canal choisi)
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -99,8 +109,7 @@ export default function FinancingDetailPage() {
   }
 
   const paidCount = plan.installments.filter((i) => i.status === 'PAID').length;
-  const nextDue =
-    plan.installments.find((i) => i.status !== 'PAID') ?? null;
+  const nextDue = plan.installments.find((i) => i.status !== 'PAID') ?? null;
   const needsDeposit =
     plan.order.status === 'PENDING' && !plan.credentialsDelivered;
 
@@ -154,21 +163,61 @@ export default function FinancingDetailPage() {
         </div>
       )}
 
-      {/* Action de paiement */}
+      {/* Paiement + choix du moyen : Wave ou Orange Money */}
       {plan.status === 'ACTIVE' && (
-        <button
-          onClick={onPayNext}
-          disabled={paying}
-          className="mb-6 w-full rounded-lg bg-emerald-500 py-3 font-semibold text-neutral-950 hover:bg-emerald-400 disabled:opacity-50"
-        >
-          {paying
-            ? 'Connexion PayTech…'
-            : needsDeposit
-              ? `Payer l'apport de ${fmt(plan.depositAmount)}`
-              : nextDue
-                ? `Payer l'échéance ${nextDue.sequence} — ${fmt(nextDue.amount)}`
-                : 'Plan soldé'}
-        </button>
+        <section className="mb-6 space-y-4">
+          <h2 className="text-sm font-semibold text-neutral-300">
+            Moyen de paiement
+          </h2>
+          <div className="grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              onClick={() => setChannel('WAVE')}
+              className={`rounded-xl border p-4 text-left transition ${
+                channel === 'WAVE'
+                  ? 'border-sky-400 bg-sky-400/10'
+                  : 'border-neutral-700 hover:border-neutral-500'
+              }`}
+            >
+              <span className="mb-1 block font-semibold">🌊 Wave</span>
+              <span className="text-xs text-neutral-400">
+                Paiement instantané par Wave
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setChannel('OM')}
+              className={`rounded-xl border p-4 text-left transition ${
+                channel === 'OM'
+                  ? 'border-orange-400 bg-orange-400/10'
+                  : 'border-neutral-700 hover:border-neutral-500'
+              }`}
+            >
+              <span className="mb-1 block font-semibold">🟠 Orange Money</span>
+              <span className="text-xs text-neutral-400">
+                Paiement instantané par Orange Money
+              </span>
+            </button>
+          </div>
+
+          <button
+            onClick={onPayNext}
+            disabled={paying}
+            className="w-full rounded-lg bg-emerald-500 py-3 font-semibold text-neutral-950 hover:bg-emerald-400 disabled:opacity-50"
+          >
+            {paying
+              ? 'Redirection…'
+              : needsDeposit
+                ? `Payer l'apport de ${fmt(plan.depositAmount)}${
+                    channel === 'WAVE' ? ' par Wave' : ' par Orange Money'
+                  }`
+                : nextDue
+                  ? `Payer l'échéance ${nextDue.sequence} — ${fmt(nextDue.amount)}${
+                      channel === 'WAVE' ? ' par Wave' : ' par Orange Money'
+                    }`
+                  : 'Plan soldé'}
+          </button>
+        </section>
       )}
 
       {/* Échéancier */}
