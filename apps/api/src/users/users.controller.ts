@@ -1,9 +1,9 @@
 import { Controller, Get, UseGuards, Request } from '@nestjs/common';
-import { JwtAuthGuard } from './jwt-auth.guard';
+import { RolesGuard } from '../common/guards/roles.guard';
 import { FastifyRequest } from 'fastify';
 
 @Controller({ path: 'users', version: '1' })
-@UseGuards(JwtAuthGuard)
+@UseGuards(RolesGuard)
 export class UsersController {
   @Get('me')
   me(@Request() req: FastifyRequest) {
