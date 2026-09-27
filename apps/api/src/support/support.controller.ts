@@ -9,6 +9,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { FastifyRequest } from 'fastify';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
@@ -28,6 +29,7 @@ export class SupportController {
 
   @Post('tickets')
   @Roles('CLIENT', 'SELLER', 'ADMIN')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   create(@Req() req: FastifyRequest, @Body() dto: CreateTicketDto) {
     return this.support.create((req as any).user.sub, dto);
   }
@@ -57,6 +59,7 @@ export class SupportController {
 
   @Post('tickets/:id/reply')
   @Roles('CLIENT', 'SELLER', 'ADMIN')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
   reply(
     @Req() req: FastifyRequest,
     @Param('id', ParseUUIDPipe) id: string,
@@ -89,6 +92,7 @@ export class SupportController {
 
   @Post('admin/tickets/:id/reply')
   @Roles('ADMIN', 'STAFF')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
   staffReply(
     @Req() req: FastifyRequest,
     @Param('id', ParseUUIDPipe) id: string,
