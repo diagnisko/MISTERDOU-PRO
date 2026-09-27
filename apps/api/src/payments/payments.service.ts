@@ -4,7 +4,7 @@ import { OrdersService } from '../orders/orders.service';
 
 /**
  * Webhook PayTech — idempotent via PaymentEvent @@unique([providerRef, eventType]).
- * Auth par clé secrète (PAYTECH_WEBHOOK_SECRET) via en-tête + IP allowlist optionnelle.
+ * Auth par clé secrète (PAYTECH_WEBHOOK_SECRET) via en-tête X-PayTech-Secret.
  * Route publique (pas d'auth utilisateur) — le secret fait office d'auth.
  */
 @Injectable()
@@ -19,7 +19,7 @@ export class PaymentsService {
   /**
    * Crée l'enregistrement Payment (INITIATED) et génère la session PayTech.
    * La redirection réelle vers PayTech se fait côté client avec les
-   * paramètres renvoyés (API-key-based, à finaliser avec les creds prod).
+   * paramètres renvoyés (à finaliser avec les creds prod).
    */
   async initiatePayment(userId: string, orderId: string) {
     const order = await this.prisma.client.order.findUnique({
@@ -48,8 +48,9 @@ export class PaymentsService {
       },
     });
 
-    // TODO(prod) : appeler l'API PayTech /payment/request avec
-    // API_KEY/API_SECRET et renvoyer payment_url/token de redirection.
+    // TODO(prod) : appeler l'API PayTech /payment/request (API_KEY/API_SECRET),
+    // passer payment.id dans custom_data pour le rattrapage au webhook,
+    // et renvoyer payment_url/token de redirection.
     return {
       paymentId: payment.id,
       amount: order.total,
@@ -63,8 +64,8 @@ export class PaymentsService {
   /**
    * Traitement du webhook PayTech :
    * 1. Vérifier le secret
-   * 2. Vérrouiller le Payment par providerRef (unicité)
-   3. Consigner PaymentEvent (idempotence)
+   * 2. Résoudre le Payment (par providerRef, sinon par custom_data.paymentId)
+   * 3. Consigner PaymentEvent — doublon @@unique → rejeu ignoré
    * 4. Statut paiement + transition commande (onPaymentSucceeded)
    */
   async handleWebhook(payload: any, secretHeader: string | undefined) {
@@ -77,83 +78,86 @@ export class PaymentsService {
     }
 
     const providerRef: string | undefined = payload?.reference;
-    const eventType: string | undefined = payload?.type_event
-      ?? payload?.event_type
-      ?? payload?.event;
-    const statusFromProvider: string | undefined = payload?.state
-      ?? payload?.status;
+    const eventType: string | undefined =
+      payload?.type_event ?? payload?.event_type ?? payload?.event;
+    const statusFromProvider: string | undefined = payload?.state ?? payload?.status;
+    const customPaymentId: string | undefined = payload?.custom_data?.paymentId;
 
-    if (!providerRef || !eventType) {
-      throw new Error('Webhook invalide : référence ou type manquant.');
+    if (!eventType) {
+      throw new Error('Webhook invalide : type d\'événement manquant.');
     }
 
     return this.prisma.client.$transaction(async (tx) => {
-      // Consignation idempotente — doublon = rejeu déjà traité
+      const paymentId = await this.resolvePaymentId(tx, providerRef, customPaymentId);
+
+      // Consignation idempotente — violation @@unique = rejeu déjà traité
       try {
         await tx.paymentEvent.create({
           data: {
-            paymentId: await this.resolvePaymentId(tx, providerRef),
-            providerRef,
+            paymentId,
+            providerRef: providerRef ?? `noref-${customPaymentId ?? paymentId}`,
             eventType,
             payload: payload as object,
           },
         });
       } catch {
-        // Violation @@unique([providerRef, eventType]) → déjà traité
         return { duplicate: true };
       }
 
       const succeeded =
-        eventType === 'payment_success'
-          || (eventType === 'sale_complete' && statusFromProvider === 'completed');
+        eventType === 'payment_success' ||
+        (eventType === 'sale_complete' && statusFromProvider === 'completed');
 
       if (succeeded) {
-        const payment = await tx.payment.findFirst({
-          where: { providerRef },
-        });
-        if (!payment) throw new Error('Paiement introuvable.');
         await tx.payment.update({
-          where: { id: payment.id },
+          where: { id: paymentId },
           data: { status: 'SUCCEEDED', paidAt: new Date() },
         });
+        const payment = await tx.payment.findUnique({ where: { id: paymentId } });
+        if (!payment) throw new Error('Paiement introuvable.');
         await this.orders.onPaymentSucceeded(payment.orderId, tx);
         return { duplicate: false, processed: true };
       }
 
       if (eventType === 'payment_canceled' || eventType === 'payment_failed') {
-        const payment = await tx.payment.findFirst({ where: { providerRef } });
-        if (payment) {
-          await tx.payment.update({
-            where: { id: payment.id },
-            data: { status: 'FAILED' },
-          });
-        }
+        await tx.payment.update({
+          where: { id: paymentId },
+          data: { status: 'FAILED' },
+        });
       }
       return { duplicate: false, processed: false };
     });
   }
 
-  private async resolvePaymentId(tx: any, providerRef: string): Promise<string> {
-    const payment = await tx.payment.findFirst({ where: { providerRef } });
-    if (payment) return payment.id;
-
-    // La référence PayTech peut précéder l'attribution du providerRef côté nous
-    // → on rattache par le champ custom_ref si présent
-    const customRef: string | undefined = payloadOf(providerRef);
-    if (!customRef) {
-      throw new Error(`Paiement introuvable pour la référence ${providerRef}.`);
+  /**
+   * Résout le Payment concerné :
+   * 1. providerRef déjà connu → Payment correspondant
+   * 2. sinon custom_data.paymentId (renvoyé par PayTech à l'initiation)
+   *    → rattache le providerRef au Payment
+   */
+  private async resolvePaymentId(
+    tx: any,
+    providerRef: string | undefined,
+    customPaymentId: string | undefined,
+  ): Promise<string> {
+    if (providerRef) {
+      const byRef = await tx.payment.findFirst({ where: { providerRef } });
+      if (byRef) return byRef.id;
     }
-    const byCustom = await tx.payment.findFirst({ where: { id: customRef } });
-    if (!byCustom) {
+
+    if (!customPaymentId) {
+      throw new Error('Webhook invalide : paiement non identifiable.');
+    }
+    const payment = await tx.payment.findUnique({ where: { id: customPaymentId } });
+    if (!payment) {
       throw new Error('Paiement introuvable.');
     }
-    await tx.payment.update({
-      where: { id: byCustom.id },
-      data: { providerRef },
-    });
-    return byCustom.id;
-    function payloadOf(_: string): string | undefined {
-      return (arguments.callee as any).custom_ref;
+    if (providerRef) {
+      await tx.payment.update({
+        where: { id: payment.id },
+        data: { providerRef },
+      });
     }
+    return payment.id;
   }
 }
