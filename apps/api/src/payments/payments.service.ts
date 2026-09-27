@@ -3,10 +3,15 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
 import { InstallmentsService } from '../installments/installments.service';
 
+export type PaymentChannel = 'WAVE' | 'OM';
+
 /**
- * Webhook PayTech — idempotent via PaymentEvent @@unique([providerRef, eventType]).
- * Auth par clé secrète (PAYTECH_WEBHOOK_SECRET) via en-tête X-PayTech-Secret.
- * Route publique (pas d'auth utilisateur) — le secret fait office d'auth.
+ * Paiements — le client choisit son canal (Wave ou Orange Money).
+ * L'agrégateur technique reste en coulisses : il n'apparaît jamais dans
+ * les réponses renvoyées au client (API et interface web).
+ *
+ * Webhook — idempotent via PaymentEvent @@unique([providerRef, eventType]).
+ * Auth par clé secrète via en-tête X-PayTech-Secret (secret serveur-à-serveur).
  */
 @Injectable()
 export class PaymentsService {
@@ -19,9 +24,9 @@ export class PaymentsService {
   // ============ INITIATION PAIEMENT (complet) ============
 
   /**
-   * Crée l'enregistrement Payment FULL et génère la session PayTech.
+   * Crée l'enregistrement Payment FULL pour le canal choisi (WAVE | OM).
    */
-  async initiatePayment(userId: string, orderId: string) {
+  async initiatePayment(userId: string, orderId: string, channel: PaymentChannel) {
     const order = await this.prisma.client.order.findUnique({
       where: { id: orderId },
     });
@@ -36,7 +41,7 @@ export class PaymentsService {
       where: { orderId, status: 'INITIATED' },
     });
     if (active) {
-      return { paymentId: active.id, amount: order.total, reuse: true };
+      return { paymentId: active.id, amount: order.total, channel, reuse: true };
     }
 
     const payment = await this.prisma.client.payment.create({
@@ -45,16 +50,17 @@ export class PaymentsService {
         type: 'FULL',
         status: 'INITIATED',
         amount: order.total,
+        channel, // WAVE | OM — canal choisi par le client
       },
     });
 
-    // TODO(prod) : appeler l'API PayTech /payment/request (API_KEY/API_SECRET),
+    // TODO(prod) : appeler l'API du canal (clés API en env, jamais exposées),
     // passer payment.id dans custom_data pour le rattrapage au webhook,
     // et renvoyer payment_url/token de redirection.
     return {
       paymentId: payment.id,
       amount: order.total,
-      provider: 'paytech',
+      channel, // renvoyé au client — canal, jamais l'agrégateur
       reuse: false,
     };
   }
@@ -62,10 +68,15 @@ export class PaymentsService {
   // ============ INITIATION PAIEMENT ÉCHELONNÉ ============
 
   /**
-   * Paiement de l'apport initial ou de la prochaine mensualité.
-   * Le type et le montant sont déterminés par le plan (jamais le client).
+   * Paiement de l'apport initial ou de la prochaine mensualité, sur le
+   * canal choisi. Le type et le montant sont déterminés par le plan
+   * (jamais le client).
    */
-  async initiateInstallmentPayment(userId: string, planId: string) {
+  async initiateInstallmentPayment(
+    userId: string,
+    planId: string,
+    channel: PaymentChannel,
+  ) {
     const next = await this.installments.preparePayment(userId, planId);
 
     const active = await this.prisma.client.payment.findFirst({
@@ -76,7 +87,7 @@ export class PaymentsService {
       },
     });
     if (active) {
-      return { paymentId: active.id, amount: active.amount, reuse: true, kind: next.kind };
+      return { paymentId: active.id, amount: active.amount, channel, kind: next.kind, reuse: true };
     }
 
     const payment = await this.prisma.client.payment.create({
@@ -86,6 +97,7 @@ export class PaymentsService {
         status: 'INITIATED',
         amount: next.amount,
         installmentId: next.installmentId,
+        channel,
       },
     });
 
@@ -93,7 +105,7 @@ export class PaymentsService {
       paymentId: payment.id,
       amount: next.amount,
       kind: next.kind,
-      provider: 'paytech',
+      channel,
       reuse: false,
     };
   }
@@ -101,7 +113,7 @@ export class PaymentsService {
   // ============ WEBHOOK (idempotent) ============
 
   /**
-   * Traitement du webhook PayTech :
+   * Traitement du webhook serveur-à-serveur :
    * 1. Vérifier le secret
    * 2. Résoudre le Payment (par providerRef, sinon par custom_data.paymentId)
    * 3. Consigner PaymentEvent — doublon @@unique → rejeu ignoré
@@ -171,7 +183,7 @@ export class PaymentsService {
   /**
    * Résout le Payment concerné :
    * 1. providerRef déjà connu → Payment correspondant
-   * 2. sinon custom_data.paymentId (renvoyé par PayTech à l'initiation)
+   * 2. sinon custom_data.paymentId (renvoyé par le canal à l'initiation)
    *    → rattache le providerRef au Payment
    */
   private async resolvePaymentId(
