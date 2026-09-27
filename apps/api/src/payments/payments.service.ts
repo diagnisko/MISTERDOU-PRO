@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { OrdersService } from '../orders/orders.service';
+import { InstallmentsService } from '../installments/installments.service';
 
 /**
  * Webhook PayTech — idempotent via PaymentEvent @@unique([providerRef, eventType]).
@@ -12,14 +13,13 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly orders: OrdersService,
+    private readonly installments: InstallmentsService,
   ) {}
 
-  // ============ INITIATION PAIEMENT ============
+  // ============ INITIATION PAIEMENT (complet) ============
 
   /**
-   * Crée l'enregistrement Payment (INITIATED) et génère la session PayTech.
-   * La redirection réelle vers PayTech se fait côté client avec les
-   * paramètres renvoyés (à finaliser avec les creds prod).
+   * Crée l'enregistrement Payment FULL et génère la session PayTech.
    */
   async initiatePayment(userId: string, orderId: string) {
     const order = await this.prisma.client.order.findUnique({
@@ -59,6 +59,45 @@ export class PaymentsService {
     };
   }
 
+  // ============ INITIATION PAIEMENT ÉCHELONNÉ ============
+
+  /**
+   * Paiement de l'apport initial ou de la prochaine mensualité.
+   * Le type et le montant sont déterminés par le plan (jamais le client).
+   */
+  async initiateInstallmentPayment(userId: string, planId: string) {
+    const next = await this.installments.preparePayment(userId, planId);
+
+    const active = await this.prisma.client.payment.findFirst({
+      where: {
+        orderId: next.orderId,
+        installmentId: next.installmentId,
+        status: 'INITIATED',
+      },
+    });
+    if (active) {
+      return { paymentId: active.id, amount: active.amount, reuse: true, kind: next.kind };
+    }
+
+    const payment = await this.prisma.client.payment.create({
+      data: {
+        orderId: next.orderId,
+        type: next.kind === 'DEPOSIT' ? 'INITIAL_DEPOSIT' : 'INSTALLMENT',
+        status: 'INITIATED',
+        amount: next.amount,
+        installmentId: next.installmentId,
+      },
+    });
+
+    return {
+      paymentId: payment.id,
+      amount: next.amount,
+      kind: next.kind,
+      provider: 'paytech',
+      reuse: false,
+    };
+  }
+
   // ============ WEBHOOK (idempotent) ============
 
   /**
@@ -66,7 +105,7 @@ export class PaymentsService {
    * 1. Vérifier le secret
    * 2. Résoudre le Payment (par providerRef, sinon par custom_data.paymentId)
    * 3. Consigner PaymentEvent — doublon @@unique → rejeu ignoré
-   * 4. Statut paiement + transition commande (onPaymentSucceeded)
+   * 4. Statut paiement + dispatch : FULL → orders, sinon → installments
    */
   async handleWebhook(payload: any, secretHeader: string | undefined) {
     const expected = process.env.PAYTECH_WEBHOOK_SECRET ?? '';
@@ -113,9 +152,9 @@ export class PaymentsService {
           where: { id: paymentId },
           data: { status: 'SUCCEEDED', paidAt: new Date() },
         });
-        const payment = await tx.payment.findUnique({ where: { id: paymentId } });
-        if (!payment) throw new Error('Paiement introuvable.');
-        await this.orders.onPaymentSucceeded(payment.orderId, tx);
+        // Dispatch : FULL → flux commande, INITIAL_DEPOSIT/INSTALLMENT → flux échelonné
+        // (InstallmentsService.onPaymentSucceeded délègue lui-même les FULL à orders)
+        await this.installments.onPaymentSucceeded(paymentId, tx);
         return { duplicate: false, processed: true };
       }
 
