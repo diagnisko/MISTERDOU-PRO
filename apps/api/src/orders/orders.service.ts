@@ -13,7 +13,7 @@ import { CryptoService } from '../crypto/crypto.service';
  * Constantes métier MISTERDOU — Phase 5
  */
 export const PLATFORM_COMMISSION = 0.15; // 15 % plateforme
-export const RESERVATION_TTL_MIN = 15; // réservation 15 min pour payer
+export const PENDING_TTL_MIN = 15; // commande impayée annulée après 15 min
 
 interface ProductRow {
   id: string;
@@ -21,6 +21,13 @@ interface ProductRow {
   title: string;
   price: Prisma.Decimal;
   status: string;
+}
+
+interface SellerRow {
+  id: string;
+  balance: Prisma.Decimal;
+  pendingBalance: Prisma.Decimal;
+  totalSales: Prisma.Decimal;
 }
 
 @Injectable()
@@ -34,20 +41,18 @@ export class OrdersService {
 
   /**
    * Création d'une commande : verrou pessimiste FOR UPDATE sur les produits.
-   * Un produit unique ne peut être acheté qu'une fois — la première
-   * transaction gagne, les concurrentes échouent (produit RESERVED).
+   * Un compte eFootball étant unique, la première transaction gagne ;
+   * les concurrentes échouent (produit RESERVED/SOLD).
    * Snapshots titre/prix capturés au moment de la commande.
    */
   async create(userId: string, dto: CreateOrderDto) {
-    // Anti-spam : max 10 items, unicité des produits
     const productIds = [...new Set(dto.items)];
     if (productIds.length === 0) {
       throw new BadRequestException('Commande vide.');
     }
 
     return this.prisma.client.$transaction(async (tx) => {
-      // Verrou pessimiste sur les produits dans un ordre stable
-      // (ordre alphabétique des ids → évite deadlock entre transactions concurrentes)
+      // Ordre stable (ids triés) → évite deadlock entre transactions concurrentes
       const locked = await tx.$queryRaw<ProductRow[]>`
         SELECT id, "sellerId", title, price, status FROM "Product"
         WHERE id IN (${Prisma.join(productIds)})
@@ -59,15 +64,13 @@ export class OrdersService {
 
       for (const p of locked) {
         if (p.status !== 'PUBLISHED') {
-          throw new ConflictProductError(p.title);
+          throw new BadRequestException(
+            `L'offre « ${p.title} » n'est plus disponible.`,
+          );
         }
       }
 
-      const subtotal = locked.reduce(
-        (sum, p) => sum + Number(p.price),
-        0,
-      );
-      const total = subtotal; // pas de promo en Phase 5
+      const subtotal = locked.reduce((sum, p) => sum + Number(p.price), 0);
 
       const order = await tx.order.create({
         data: {
@@ -78,7 +81,7 @@ export class OrdersService {
           userId,
           status: 'PENDING',
           subtotal: new Prisma.Decimal(subtotal),
-          total: new Prisma.Decimal(total),
+          total: new Prisma.Decimal(subtotal), // pas de promo en Phase 5
           items: {
             create: locked.map((p) => ({
               productId: p.id,
@@ -92,13 +95,10 @@ export class OrdersService {
         include: { items: true },
       });
 
-      // Réservation des produits (expiration 15 min)
+      // Réservation exclusive des produits
       await tx.product.updateMany({
         where: { id: { in: productIds } },
-        data: {
-          status: 'RESERVED',
-          reservedUntil: new Date(Date.now() + RESERVATION_TTL_MIN * 60_000),
-        },
+        data: { status: 'RESERVED' },
       });
 
       return order;
@@ -107,7 +107,7 @@ export class OrdersService {
 
   // ============ ANNULATION ============
 
-  /** Annulation par l'acheteur (PENDING uniquement) → produits libérés. */
+  /** Annulation acheteur (PENDING uniquement) → produits libérés. */
   async cancel(userId: string, orderId: string, role: string) {
     return this.prisma.client.$transaction(async (tx) => {
       const order = await tx.order.findUnique({
@@ -128,14 +128,12 @@ export class OrdersService {
         where: { id: orderId },
         data: { status: 'CANCELLED', cancelledAt: new Date() },
       });
-
-      // Libération des produits non vendus
       await tx.product.updateMany({
         where: {
           id: { in: order.items.map((i) => i.productId) },
           status: 'RESERVED',
         },
-        data: { status: 'PUBLISHED', reservedUntil: null },
+        data: { status: 'PUBLISHED' },
       });
 
       return { status: 'CANCELLED' };
@@ -147,11 +145,12 @@ export class OrdersService {
   /**
    * Suite au paiement vérifié :
    * 1. Commande → CREDENTIALS_DELIVERED, produits → SOLD
-   * 2. Identifiants chiffrés révélés à l'acheteur (déchiffrement à la lecture)
-   * 3. Crédit vendeur en séquestre (net de la commission 15 %)
-   * 4. SellerBalanceEvent + notification acheteur
+   * 2. Identifiants marqués remis (déchiffrement à la lecture uniquement)
+   * 3. Crédit vendeur en séquestre — net de commission 15 %
+   * 4. SellerBalanceEvent (SALE + COMMISSION) + notification acheteur
+   * Idempotent : commande non-PENDING → no-op.
    */
-  async onPaymentSucceeded(orderId: string, paymentId: string, tx?: any) {
+  async onPaymentSucceeded(orderId: string, tx?: any) {
     const db = tx ?? this.prisma.client;
     const order = await db.order.findUnique({
       where: { id: orderId },
@@ -159,10 +158,10 @@ export class OrdersService {
     });
     if (!order) throw new NotFoundException('Commande introuvable.');
     if (order.status !== 'PENDING') {
-      return { alreadyProcessed: true }; // idempotence au niveau commande
+      return { alreadyProcessed: true };
     }
 
-    // 1. Commande confirmée + produits vendus
+    // 1-2. Commande confirmée + produits vendus + identifiants remis
     await db.order.update({
       where: { id: orderId },
       data: {
@@ -175,21 +174,21 @@ export class OrdersService {
       where: { id: { in: order.items.map((i) => i.productId) } },
       data: { status: 'SOLD', soldAt: new Date() },
     });
-
-    // 2. Marquer les identifiants comme remis à l'acheteur
     await db.productCredential.updateMany({
       where: { productId: { in: order.items.map((i) => i.productId) } },
       data: { deliveredAt: new Date(), deliveredTo: order.userId },
     });
 
-    // 3. Crédit vendeur (séquestre anti-fraude) — net de commission 15 %
+    // 3. Crédit vendeur (séquestre anti-fraude)
     for (const item of order.items) {
       if (!item.sellerId) continue; // offre admin : pas de crédit vendeur
+
       const gross = Number(item.priceSnapshot);
-      const net = Math.round(gross * (1 - PLATFORM_COMMISSION) * 100) / 100;
+      const commission = Math.round(gross * PLATFORM_COMMISSION * 100) / 100;
+      const net = Math.round((gross - commission) * 100) / 100;
 
       const locked = await db.$queryRaw<SellerRow[]>`
-        SELECT id, balance, "pendingBalance" FROM "Seller"
+        SELECT id, balance, "pendingBalance", "totalSales" FROM "Seller"
         WHERE id = ${item.sellerId} FOR UPDATE`;
       const balance = Number(locked[0].balance);
       const pendingBalance = Number(locked[0].pendingBalance);
@@ -202,29 +201,25 @@ export class OrdersService {
           salesCount: { increment: 1 },
         },
       });
-      await db.sellerBalanceEvent.create({
-        data: {
-          sellerId: item.sellerId,
-          amount: new Prisma.Decimal(net),
-          type: 'SALE',
-          balanceAfter: new Prisma.Decimal(balance), // reste en séquestre
-          orderId,
-          description: `Vente « ${item.titleSnapshot} » — net après commission 15 %`,
-        },
-      });
-      await db.sellerBalanceEvent.create({
-        data: {
-          sellerId: item.sellerId,
-          amount: new Prisma.Decimal(-net * PLATFORM_COMMISSION / (1 - PLATFORM_COMMISSION)),
-          type: 'COMMISSION',
-          balanceAfter: new Prisma.Decimal(balance),
-          orderId,
-          description: `Commission plateforme 15 %`,
-        },
-      });
-      await db.seller.update({
-        where: { id: item.sellerId },
-        data: { pendingBalance: new Prisma.Decimal(pendingBalance + net) },
+      await db.sellerBalanceEvent.createMany({
+        data: [
+          {
+            sellerId: item.sellerId,
+            amount: new Prisma.Decimal(net),
+            type: 'SALE',
+            balanceAfter: new Prisma.Decimal(balance), // reste en séquestre
+            orderId,
+            description: `Vente « ${item.titleSnapshot} » — net vendeur`,
+          },
+          {
+            sellerId: item.sellerId,
+            amount: new Prisma.Decimal(-commission),
+            type: 'COMMISSION',
+            balanceAfter: new Prisma.Decimal(balance),
+            orderId,
+            description: `Commission plateforme 15 % — « ${item.titleSnapshot} »`,
+          },
+        ],
       });
     }
 
@@ -250,7 +245,9 @@ export class OrdersService {
         skip: (page - 1) * perPage,
         take: perPage,
         include: {
-          items: { include: { product: { select: { slug: true, title: true } } } },
+          items: {
+            include: { product: { select: { slug: true, title: true } } },
+          },
         },
       }),
       this.prisma.client.order.count({ where: { userId } }),
@@ -262,11 +259,7 @@ export class OrdersService {
     const order = await this.prisma.client.order.findUnique({
       where: { id: orderId },
       include: {
-        items: {
-          include: {
-            product: { select: { slug: true, title: true } },
-          },
-        },
+        items: { include: { product: { select: { slug: true, title: true } } } },
         payments: { orderBy: { createdAt: 'desc' }, take: 5 },
       },
     });
@@ -280,8 +273,8 @@ export class OrdersService {
   // ============ RÉVÉLATION DES IDENTIFIANTS ============
 
   /**
-   * Seul l'acheteur (commande CREDENTIALS_DELIVERED/COMPLETED) peut
-   * révéler les identifiants. Déchiffrement à la volée, jamais stocké en clair.
+   * Seul l'acheteur (commande CREDENTIALS_DELIVERED/COMPLETED) révèle les
+   * identifiants. Déchiffrement à la volée — jamais stocké en clair.
    */
   async revealCredentials(userId: string, orderId: string, productId: string) {
     const order = await this.prisma.client.order.findUnique({
@@ -304,43 +297,36 @@ export class OrdersService {
     const cred = await this.prisma.client.productCredential.findUnique({
       where: { productId },
     });
-    if (!cred) {
-      throw new NotFoundException('Identifiants non disponibles.');
-    }
+    if (!cred) throw new NotFoundException('Identifiants non disponibles.');
 
     const plain = JSON.parse(this.crypto.decrypt(cred.cipherText));
     return { login: plain.login, password: plain.password };
   }
 
-  // ============ LIBÉRATION DES EXPIRÉES (cron, phase ultérieure) ============
+  // ============ EXPIRATION (cron / appel manuel) ============
 
-  /** Libère les produits RESERVED dont la réservation a expiré. */
+  /** Annule les commandes PENDING de plus de 15 min et libère les produits. */
   async releaseExpired() {
-    const result = await this.prisma.client.$transaction(async (tx) => {
-      const stale = await tx.product.findMany({
-        where: { status: 'RESERVED', reservedUntil: { lt: new Date() } },
-        select: { id: true },
+    const cutoff = new Date(Date.now() - PENDING_TTL_MIN * 60_000);
+    return this.prisma.client.$transaction(async (tx) => {
+      const stale = await tx.order.findMany({
+        where: { status: 'PENDING', createdAt: { lt: cutoff } },
+        include: { items: true },
       });
-      if (stale.length === 0) return { released: 0 };
+      if (stale.length === 0) return { cancelled: 0 };
+
+      await tx.order.updateMany({
+        where: { id: { in: stale.map((o) => o.id) } },
+        data: { status: 'CANCELLED', cancelledAt: new Date() },
+      });
       await tx.product.updateMany({
-        where: { id: { in: stale.map((s) => s.id) }, status: 'RESERVED' },
-        data: { status: 'PUBLISHED', reservedUntil: null },
+        where: {
+          id: { in: stale.flatMap((o) => o.items.map((i) => i.productId)) },
+          status: 'RESERVED',
+        },
+        data: { status: 'PUBLISHED' },
       });
-      return { released: stale.length };
+      return { cancelled: stale.length };
     });
-    return result;
-  }
-}
-
-interface SellerRow {
-  id: string;
-  balance: Prisma.Decimal;
-  pendingBalance: Prisma.Decimal;
-  totalSales: Prisma.Decimal;
-}
-
-class ConflictProductError extends BadRequestException {
-  constructor(title: string) {
-    super(`L'offre « ${title} » n'est plus disponible (réservée ou vendue).`);
   }
 }
