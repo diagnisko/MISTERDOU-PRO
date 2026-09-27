@@ -15,6 +15,9 @@ import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { InstallmentsModule } from './installments/installments.module';
 import { AdminModule } from './admin/admin.module';
+import { SupportModule } from './support/support.module';
+import { NotificationsModule } from './notifications/notifications.module';
+import { PromotionsModule } from './promotions/promotions.module';
 
 @Module({
   imports: [
@@ -39,6 +42,9 @@ import { AdminModule } from './admin/admin.module';
     PaymentsModule,
     InstallmentsModule,
     AdminModule,
+    SupportModule,
+    NotificationsModule,
+    PromotionsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
