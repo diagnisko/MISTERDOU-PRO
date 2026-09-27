@@ -11,6 +11,8 @@ import { StorageModule } from './storage/storage.module';
 import { CryptoModule } from './crypto/crypto.module';
 import { ProductsModule } from './products/products.module';
 import { SellersModule } from './sellers/sellers.module';
+import { OrdersModule } from './orders/orders.module';
+import { PaymentsModule } from './payments/payments.module';
 
 @Module({
   imports: [
@@ -31,6 +33,8 @@ import { SellersModule } from './sellers/sellers.module';
     CryptoModule,
     ProductsModule,
     SellersModule,
+    OrdersModule,
+    PaymentsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
