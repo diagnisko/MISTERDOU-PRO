@@ -9,6 +9,8 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import { FastifyRequest } from 'fastify';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { SellersService } from './sellers.service';
@@ -18,7 +20,6 @@ import {
   ReviewSellerDto,
   ReviewWithdrawalDto,
 } from './dto/seller.dto';
-import { FastifyRequest } from 'fastify';
 
 @Controller({ path: 'sellers', version: '1' })
 @UseGuards(RolesGuard)
@@ -29,6 +30,7 @@ export class SellersController {
 
   @Post('apply')
   @Roles('CLIENT', 'SELLER')
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
   apply(@Req() req: FastifyRequest, @Body() dto: ApplySellerDto) {
     return this.sellers.apply((req as any).user.sub, dto);
   }
@@ -83,6 +85,7 @@ export class SellersController {
 
   @Post('me/withdrawals')
   @Roles('SELLER')
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
   requestWithdrawal(
     @Req() req: FastifyRequest,
     @Body() dto: RequestWithdrawalDto,
