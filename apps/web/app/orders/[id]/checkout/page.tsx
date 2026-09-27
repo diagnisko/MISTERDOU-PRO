@@ -14,6 +14,8 @@ interface Order {
   items: { id: string; titleSnapshot: string; priceSnapshot: string }[];
 }
 
+type Channel = 'WAVE' | 'OM';
+
 const fmt = (n: string | number) =>
   new Intl.NumberFormat('fr-SN').format(Number(n)) + ' FCFA';
 
@@ -23,6 +25,7 @@ export default function CheckoutPage() {
   const [order, setOrder] = useState<Order | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
+  const [channel, setChannel] = useState<Channel>('WAVE');
 
   useEffect(() => {
     const token = localStorage.getItem('md_token');
@@ -43,12 +46,15 @@ export default function CheckoutPage() {
     try {
       const res = await fetch(`${API}/api/v1/payments/initiate/${id}`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${token ?? ''}` },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token ?? ''}`,
+        },
+        body: JSON.stringify({ channel }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.message ?? 'Erreur paiement');
-      // TODO(prod) : rediriger vers data.payment_url dès l'intégration
-      // réelle PayTech. Pour l'instant : retour aux commandes.
+      // TODO(prod) : rediriger vers data.payment_url (page du canal choisi)
       router.push('/orders');
     } catch (e) {
       setError((e as Error).message);
@@ -105,13 +111,58 @@ export default function CheckoutPage() {
         </div>
       </div>
 
+      {/* Choix du moyen de paiement : Wave ou Orange Money uniquement */}
+      <h2 className="mb-3 text-sm font-semibold text-neutral-300">
+        Choisissez votre moyen de paiement
+      </h2>
+      <div className="mb-6 grid grid-cols-2 gap-3">
+        <button
+          type="button"
+          onClick={() => setChannel('WAVE')}
+          className={`rounded-xl border p-4 text-left transition ${
+            channel === 'WAVE'
+              ? 'border-sky-400 bg-sky-400/10'
+              : 'border-neutral-700 hover:border-neutral-500'
+          }`}
+        >
+          <span className="mb-1 block font-semibold">🌊 Wave</span>
+          <span className="text-xs text-neutral-400">
+            Paiement instantané par Wave
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setChannel('OM')}
+          className={`rounded-xl border p-4 text-left transition ${
+            channel === 'OM'
+              ? 'border-orange-400 bg-orange-400/10'
+              : 'border-neutral-700 hover:border-neutral-500'
+          }`}
+        >
+          <span className="mb-1 block font-semibold">🟠 Orange Money</span>
+          <span className="text-xs text-neutral-400">
+            Paiement instantané par Orange Money
+          </span>
+        </button>
+      </div>
+
+      {error && (
+        <p className="mb-4 rounded-lg border border-red-500/50 bg-red-500/10 p-3 text-sm text-red-400">
+          {error}
+        </p>
+      )}
+
       <div className="space-y-3">
         <button
           onClick={onPay}
           disabled={paying || order.status !== 'PENDING'}
           className="w-full rounded-lg bg-emerald-500 py-3 font-semibold text-neutral-950 transition hover:bg-emerald-400 disabled:opacity-50"
         >
-          {paying ? 'Connexion PayTech…' : `Payer ${fmt(order.total)} avec PayTech`}
+          {paying
+            ? 'Redirection…'
+            : channel === 'WAVE'
+              ? `Payer ${fmt(order.total)} par Wave`
+              : `Payer ${fmt(order.total)} par Orange Money`}
         </button>
         <button
           onClick={onCancel}
