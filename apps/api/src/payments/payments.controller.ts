@@ -1,15 +1,17 @@
 import {
   Body,
   Controller,
+  Param,
+  ParseUUIDPipe,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
-import { ApiExcludeEndpoint } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import { FastifyRequest } from 'fastify';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { PaymentsService } from './payments.service';
-import { FastifyRequest } from 'fastify';
 
 @Controller({ path: 'payments', version: '1' })
 @UseGuards(RolesGuard)
@@ -18,34 +20,27 @@ export class PaymentsController {
 
   /**
    * Initiation du paiement (utilisateur authentifié).
-   * Route dédiée (séparée d'orders) — ne pas fusionner avec le webhook.
    */
   @Post('initiate/:orderId')
   @Roles('CLIENT', 'SELLER', 'ADMIN')
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
-  async initiate(
-    @Body() _body: unknown,
-    @Param('orderId', ParseUUIDPipe) orderId: string,
+  initiate(
     @Req() req: FastifyRequest,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
   ) {
     return this.payments.initiatePayment((req as any).user.sub, orderId);
   }
 
   /**
-   * Webhook PayTech — PUBLIC (auth par secret header), idempotent.
+   * Webhook PayTech — PUBLIC (auth par secret header X-PayTech-Secret),
+   * idempotent via PaymentEvent. Le secret fait office d'auth.
    */
   @Post('webhook/paytech')
-  @ApiExcludeEndpoint()
   @Throttle({ default: { limit: 60, ttl: 60_000 } })
-  async webhook(
-    @Body() payload: unknown,
-    @Req() req: FastifyRequest,
-  ) {
+  webhook(@Req() req: FastifyRequest, @Body() payload: unknown) {
     return this.payments.handleWebhook(
       payload,
       (req.headers['x-paytech-secret'] as string) ?? undefined,
     );
   }
 }
-
-import { Param, ParseUUIDPipe, Req } from '@nestjs/common';
