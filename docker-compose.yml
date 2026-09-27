@@ -1,0 +1,74 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: misterdou-postgres
+    environment:
+      POSTGRES_USER: misterdou
+      POSTGRES_PASSWORD: misterdou
+      POSTGRES_DB: misterdou
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U misterdou"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: misterdou-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # OPTIONNEL — stockage local pour développer hors ligne.
+  # Par défaut, le projet utilise Cloudflare R2 (buckets privé + public).
+  # Activer avec : docker compose --profile local-storage up -d
+  minio:
+    image: minio/minio:latest
+    container_name: misterdou-minio
+    profiles: ["local-storage"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio-init:
+    image: minio/mc:latest
+    profiles: ["local-storage"]
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+      mc alias set local http://minio:9000 minioadmin minioadmin &&
+      mc mb -p local/misterdou-kyc --ignore-existing &&
+      mc anonymous set none local/misterdou-kyc &&
+      mc mb -p local/misterdou-media --ignore-existing &&
+      mc anonymous set download local/misterdou-media &&
+      echo 'Buckets locaux OK (KYC privé, médias publics)'
+      "
+
+volumes:
+  pgdata:
+  redisdata:
+  miniodata:
